@@ -1,0 +1,20 @@
+.env
+__pycache__/
+*.pyc
+logs/
+python
+py
+tunnel_out.log
+tunnel_err.log
+tunnel.log
+live_url.txt
+LIVE_URL.txt
+cloudflared.exe
+TOKEN GENRATOR.py
+TRADE PLACEMENT SCANER.py
+main.py
+host_live.py
+tunnel_only.py
+start_live_host.ps1
+START_LIVE.bat
+hf_space_README.md
