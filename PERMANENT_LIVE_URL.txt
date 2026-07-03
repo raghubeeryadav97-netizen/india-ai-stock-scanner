@@ -1,0 +1,15 @@
+PERMANENT LIVE WEBSITE (24/7)
+================================
+https://raghubeeryadav97-netizen-india-ai-stock-sc-streamlit-app-xv6qqf.streamlit.app/
+
+GitHub Repo:
+https://github.com/raghubeeryadav97-netizen/india-ai-stock-scanner
+
+Streamlit Cloud Dashboard:
+https://share.streamlit.io
+
+Deployed: July 2026
+Main file: streamlit_app.py
+Branch: main
+
+NOTE: PC band hone par bhi yeh URL live rahegi.
