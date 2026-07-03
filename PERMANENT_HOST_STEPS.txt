@@ -1,0 +1,57 @@
+INDIA AI STOCK SCANNER - PERMANENT 24/7 HOSTING
+==============================================
+
+Sab files ready hain. Sirf 1 baar login/token chahiye (free).
+
+OPTION A - HUGGING FACE (FASTEST, 5 MIN)  *** RECOMMENDED ***
+------------------------------------------------------------
+1) Account: https://huggingface.co/join
+2) Token (Write): https://huggingface.co/settings/tokens
+3) PowerShell mein project folder mein:
+
+   cd "C:\Users\user\OneDrive\Desktop\complain\pro Trading APP\STOCK Scaner"
+   $env:HF_USERNAME="apna_username"
+   $env:HF_TOKEN="hf_apna_token"
+   powershell -ExecutionPolicy Bypass -File deploy_hf_push.ps1
+
+4) Permanent URL milega:
+   https://APNA_USERNAME-india-ai-stock-scanner.hf.space
+
+OPTION B - STREAMLIT CLOUD (BEST FOR STREAMLIT)
+---------------------------------------------
+1) GitHub repo banao: https://github.com/new
+   Name: india-ai-stock-scanner (Public)
+
+2) PowerShell:
+   cd "C:\Users\user\OneDrive\Desktop\complain\pro Trading APP\STOCK Scaner"
+   git remote add origin https://github.com/APNA_USERNAME/india-ai-stock-scanner.git
+   git branch -M main
+   git push -u origin main
+
+3) Deploy: https://share.streamlit.io
+   - Sign in with GitHub
+   - New app -> repo select karo
+   - Main file: streamlit_app.py
+   - Deploy
+
+4) Permanent URL:
+   https://india-ai-stock-scanner.streamlit.app  (ya similar)
+
+OPTION C - RENDER.COM
+---------------------
+1) https://render.com -> Sign up
+2) New Web Service -> Connect GitHub repo (Option B push ke baad)
+3) render.yaml auto-detect hoga
+
+FILES ALREADY PREPARED
+----------------------
+- streamlit_app.py (cloud entry)
+- requirements.txt (streamlit + pandas)
+- deploy_bundle/ (HF upload ready)
+- git commit done locally
+- PERMANENT_HOST.bat (menu)
+
+NOTE
+----
+127.0.0.1:8501 = sirf local PC
+Permanent URL = HF / Streamlit / Render (upar wale)
