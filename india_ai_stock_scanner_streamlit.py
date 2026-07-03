@@ -1,8 +1,11 @@
 import streamlit as st
 import pandas as pd
 import json
+import hashlib
 from datetime import datetime
 from pathlib import Path
+
+PROMPT_ACCESS_HASH = hashlib.sha256("543251".encode()).hexdigest()
 
 st.set_page_config(
     page_title="India AI Stock Scanner",
@@ -96,6 +99,12 @@ st.markdown("""
 .metric-box .lbl { font-size:11px; color:#94a3b8; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; margin-top:2px; }
 .metric-box .sub { font-size:10px; color:#cbd5e1; margin-top:2px; }
 
+/* Prompt lock — discourage copy */
+[data-testid="stSidebar"] .stCodeBlock pre {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 /* Regime banner */
 .regime { background:linear-gradient(90deg,#052e16,#064e3b); border-radius:10px;
           padding:12px 20px; color:#6ee7b7; font-size:13px; margin-bottom:16px; }
@@ -165,14 +174,8 @@ def target_boxes(row):
     </div>"""
 
 
-# ==================== SIDEBAR ====================
-with st.sidebar:
-    st.markdown("## 📈 India AI Scanner")
-    st.markdown("---")
-    st.markdown("### 🤖 Step 1 — Get AI Prompt")
-
-    if st.button("📋 Copy Fresh AI Prompt", use_container_width=True):
-        prompt = """You are an elite Indian equity market strategist, institutional flow analyst, portfolio manager, and quantitative stock screener specializing in Indian equities.
+def get_ai_prompt_text():
+    return """You are an elite Indian equity market strategist, institutional flow analyst, portfolio manager, and quantitative stock screener specializing in Indian equities.
 
 MISSION
 Analyze the CURRENT Indian stock market using the latest available verified data and identify ONLY the highest-probability bullish opportunities for swing trading and positional investing.
@@ -279,8 +282,36 @@ Return ONLY valid JSON. No markdown. No explanation. No notes.
     }
   ]
 }"""
-        st.code(prompt, language="text")
-        st.info("⬆️ Copy → Paste in Claude/Grok → Get JSON → Come back here")
+
+
+# ==================== SIDEBAR ====================
+with st.sidebar:
+    st.markdown("## 📈 India AI Scanner")
+    st.markdown("---")
+    st.markdown("### 🤖 Step 1 — Get AI Prompt")
+
+    if not st.session_state.get("prompt_unlocked"):
+        st.markdown("🔒 **Prompt locked**")
+        st.caption("Sirf authorized users prompt dekh/copy kar sakte hain.")
+        prompt_pwd = st.text_input("Password", type="password", key="prompt_password", placeholder="Enter password")
+        if st.button("🔓 Unlock Prompt", use_container_width=True):
+            entered_hash = hashlib.sha256(prompt_pwd.encode()).hexdigest()
+            if entered_hash == PROMPT_ACCESS_HASH:
+                st.session_state["prompt_unlocked"] = True
+                st.success("✅ Unlocked!")
+                st.rerun()
+            else:
+                st.error("❌ Galat password")
+    else:
+        if st.button("📋 Show AI Prompt", use_container_width=True):
+            st.session_state["show_prompt"] = True
+        if st.session_state.get("show_prompt"):
+            st.code(get_ai_prompt_text(), language="text")
+            st.info("⬆️ Copy → Paste in Claude/Grok → Get JSON → Come back here")
+        if st.button("🔒 Lock Prompt", use_container_width=True):
+            st.session_state["prompt_unlocked"] = False
+            st.session_state.pop("show_prompt", None)
+            st.rerun()
 
     st.markdown("---")
     st.markdown("### 📥 Step 2 — Paste JSON")
