@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>html,body{margin:0;padding:0;height:0;overflow:hidden;}</style>
+  <script>
+    const STORAGE_KEY = "india_ai_scanner_user_last_v1";
+
+    function sendMessageToStreamlitClient(type, data) {
+      const outData = Object.assign({ isStreamlitMessage: true, type: type }, data);
+      window.parent.postMessage(outData, "*");
+    }
+
+    function init() {
+      sendMessageToStreamlitClient("streamlit:componentReady", { apiVersion: 1 });
+    }
+
+    function setFrameHeight(height) {
+      sendMessageToStreamlitClient("streamlit:setFrameHeight", { height: height });
+    }
+
+    function setComponentValue(value) {
+      sendMessageToStreamlitClient("streamlit:setComponentValue", { value: value });
+    }
+
+    function onRender(event) {
+      if (!event.data || event.data.type !== "streamlit:render") return;
+      const args = event.data.args || {};
+      const mode = args.mode || "get";
+      try {
+        if (mode === "set" && typeof args.value === "string") {
+          localStorage.setItem(STORAGE_KEY, args.value);
+          setComponentValue({ ok: true, mode: "set", len: args.value.length });
+        } else if (mode === "clear") {
+          localStorage.removeItem(STORAGE_KEY);
+          setComponentValue({ ok: true, mode: "clear" });
+        } else {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          setComponentValue({ ok: true, mode: "get", value: raw });
+        }
+      } catch (e) {
+        setComponentValue({ ok: false, error: String(e) });
+      }
+      setFrameHeight(0);
+    }
+
+    window.addEventListener("message", onRender);
+    init();
+    setFrameHeight(0);
+  </script>
+</head>
+<body></body>
+</html>

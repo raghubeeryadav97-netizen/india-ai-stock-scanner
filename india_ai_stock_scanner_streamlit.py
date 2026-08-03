@@ -17,56 +17,133 @@ st.set_page_config(
 )
 
 # ==================== PERSISTENT STORAGE ====================
-# Streamlit Cloud pe session reconnect / app sleep se data hat jata tha.
-# 3-layer backup: session_state → in-memory cache_resource → disk files
+# ONLY last USER "Load Analysis" data is kept — never old demo / git JSON.
+# Layers: session → browser localStorage → memory store → disk (user-marked only)
+import streamlit.components.v1 as components
+
 _APP_DIR = Path(__file__).resolve().parent
+_LS_COMPONENT_DIR = _APP_DIR / "ls_component"
 _SAVE_CANDIDATES = [
-    _APP_DIR / "artifacts" / "saved_ai_stock_analysis.json",
-    Path(os.environ.get("TMPDIR", os.environ.get("TMP", "/tmp"))) / "india_ai_stock_analysis.json",
-    Path.home() / ".india_ai_stock_scanner" / "saved_ai_stock_analysis.json",
+    # Prefer temp/home first so git-bundled artifacts file never wins on Cloud reboot
+    Path(os.environ.get("TMPDIR", os.environ.get("TMP", "/tmp"))) / "india_ai_stock_analysis_USER.json",
+    Path.home() / ".india_ai_stock_scanner" / "saved_ai_stock_analysis_USER.json",
+    _APP_DIR / "artifacts" / "saved_ai_stock_analysis_USER.json",
 ]
-SAVED_DATA_FILE = _SAVE_CANDIDATES[0]
+_BROWSER_KEY = "india_ai_scanner_user_last_v1"
+
+try:
+    _ls_component = components.declare_component("india_ai_ls", path=str(_LS_COMPONENT_DIR))
+except Exception:
+    _ls_component = None
 
 
 @st.cache_resource
 def _global_analysis_store():
-    """Survives browser reconnects while the Streamlit process stays warm."""
+    """Last USER load only. Survives browser reconnect while process is warm."""
     return {"data": None, "saved_at": None, "source": None}
 
 
 def _is_valid_analysis(data):
-    return isinstance(data, dict) and (
-        bool(data.get("stocks")) or bool(data.get("market")) or bool(data.get("strategy"))
-    )
+    """Must have real stocks — empty placeholder / demo without stocks = invalid."""
+    if not isinstance(data, dict):
+        return False
+    stocks = data.get("stocks")
+    return isinstance(stocks, list) and len(stocks) > 0
 
 
-def _read_json_file(path: Path):
+def _is_user_loaded(data):
+    """Only data the user explicitly loaded via Load Analysis button."""
+    if not _is_valid_analysis(data):
+        return False
+    if data.get("_user_loaded") is True:
+        return True
+    # Memory store may hold user payload before marker re-check
+    return False
+
+
+def _strip_internal_keys(data):
+    if not isinstance(data, dict):
+        return data
+    return {k: v for k, v in data.items() if not str(k).startswith("_")}
+
+
+def _mark_user_payload(data_dict):
+    payload = dict(data_dict)
+    # Drop any stale internal flags from a previous paste
+    for k in list(payload.keys()):
+        if str(k).startswith("_"):
+            payload.pop(k, None)
+    payload["_user_loaded"] = True
+    payload["_scanner_saved_at"] = datetime.now().isoformat(timespec="seconds")
+    n = len(payload.get("stocks") or [])
+    payload["_scanner_label"] = f"{n} stocks @ {payload['_scanner_saved_at']}"
+    return payload
+
+
+def _browser_ls(mode="get", value=None, key="ls_bridge"):
+    """Read/write last user analysis in the browser (survives hard refresh)."""
+    # Fire-and-forget HTML backup write (works even if declare_component is flaky)
+    if mode == "set" and value:
+        try:
+            safe = json.dumps(value)
+            components.html(
+                f"""<script>
+                try {{ localStorage.setItem({json.dumps(_BROWSER_KEY)}, {safe}); }} catch (e) {{}}
+                </script>""",
+                height=0,
+                width=0,
+            )
+        except Exception:
+            pass
+    if mode == "clear":
+        try:
+            components.html(
+                f"""<script>
+                try {{ localStorage.removeItem({json.dumps(_BROWSER_KEY)}); }} catch (e) {{}}
+                </script>""",
+                height=0,
+                width=0,
+            )
+        except Exception:
+            pass
+
+    if _ls_component is None:
+        return {"ok": True, "mode": mode, "value": None} if mode == "get" else {"ok": True, "mode": mode}
+    try:
+        if mode == "set":
+            return _ls_component(mode="set", value=value or "", key=key, default=None)
+        if mode == "clear":
+            return _ls_component(mode="clear", key=key, default=None)
+        return _ls_component(mode="get", key=key, default=None)
+    except Exception:
+        return None
+
+
+def _read_user_json_file(path: Path):
     try:
         if path.exists() and path.stat().st_size > 2:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            if _is_valid_analysis(data):
+            if _is_user_loaded(data):
                 return data, path.stat().st_mtime
     except Exception:
         pass
     return None, 0
 
 
-def load_saved_data():
+def load_saved_user_data():
+    """Only restore files written by Load Analysis (_user_loaded=true)."""
     best, best_mtime = None, 0
     for path in _SAVE_CANDIDATES:
-        data, mtime = _read_json_file(path)
+        data, mtime = _read_user_json_file(path)
         if data is not None and mtime >= best_mtime:
             best, best_mtime = data, mtime
     return best
 
 
-def save_data_to_file(data_dict):
-    """Write to every writable path so Cloud reboot / path quirks don't wipe analysis."""
+def save_user_data_to_disk(payload):
     ok = False
     last_err = None
-    payload = dict(data_dict)
-    payload["_scanner_saved_at"] = datetime.now().isoformat(timespec="seconds")
     for path in _SAVE_CANDIDATES:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,13 +152,7 @@ def save_data_to_file(data_dict):
             ok = True
         except Exception as e:
             last_err = e
-    store = _global_analysis_store()
-    store["data"] = payload
-    store["saved_at"] = time.time()
-    store["source"] = "user_load"
-    if not ok and last_err is not None:
-        st.warning(f"Disk save failed (session memory still holds data): {last_err}")
-    return ok
+    return ok, last_err
 
 
 def delete_saved_data():
@@ -95,51 +166,121 @@ def delete_saved_data():
                 path.unlink()
         except Exception:
             pass
+    # Clear browser copy on next run
+    st.session_state["_ls_clear"] = True
+    st.session_state.pop("_ls_got", None)
+    st.session_state.pop("ai_data", None)
 
 
 def persist_analysis(data_dict, source="user_load"):
-    """Single entry-point: session + memory + disk."""
-    st.session_state["ai_data"] = data_dict
+    """Save ONLY explicit user Load Analysis — overwrites previous user load."""
+    payload = _mark_user_payload(data_dict)
+    st.session_state["ai_data"] = payload
+    st.session_state["_loaded_from_file"] = False
+    st.session_state["_data_source"] = "user_load"
+    st.session_state["_data_loaded_at"] = datetime.now().strftime("%d %b %Y %I:%M %p")
+    st.session_state["_ls_pending_write"] = json.dumps(payload, ensure_ascii=False)
+    st.session_state.pop("_ls_clear", None)
+
+    store = _global_analysis_store()
+    store["data"] = payload
+    store["saved_at"] = time.time()
+    store["source"] = "user_load"
+
+    ok, last_err = save_user_data_to_disk(payload)
+    if not ok and last_err is not None:
+        st.warning(f"Disk save partial fail (browser+memory still hold your load): {last_err}")
+    return payload
+
+
+def _apply_restored(data, source):
+    st.session_state["ai_data"] = data
     st.session_state["_loaded_from_file"] = source != "user_load"
     st.session_state["_data_source"] = source
-    st.session_state["_data_loaded_at"] = datetime.now().strftime("%d %b %Y %I:%M %p")
-    save_data_to_file(data_dict)
+    label = data.get("_scanner_saved_at") or data.get("_scanner_label") or ""
+    st.session_state["_data_loaded_at"] = label or datetime.now().strftime("%d %b %Y %I:%M %p")
+    store = _global_analysis_store()
+    store["data"] = data
+    store["saved_at"] = store.get("saved_at") or time.time()
+    store["source"] = source
 
 
 def restore_analysis_into_session():
-    """Fill empty session from memory store, then disk. Never clobber live session data."""
-    if _is_valid_analysis(st.session_state.get("ai_data")):
-        # Keep memory/disk in sync so reconnects can recover
+    """
+    Restore LAST USER load only.
+    Order: existing session (if user) → browser LS → memory → disk user file.
+    Never loads old demo / git placeholder.
+    """
+    current = st.session_state.get("ai_data")
+    if _is_user_loaded(current):
         store = _global_analysis_store()
-        if store.get("data") is not st.session_state["ai_data"]:
-            store["data"] = st.session_state["ai_data"]
+        if store.get("data") is not current:
+            store["data"] = current
             store["saved_at"] = store.get("saved_at") or time.time()
+            store["source"] = "user_load"
         return
+
+    # If session has non-user junk (old demo), drop it
+    if current is not None:
+        st.session_state.pop("ai_data", None)
 
     store = _global_analysis_store()
-    if _is_valid_analysis(store.get("data")):
-        st.session_state["ai_data"] = store["data"]
-        st.session_state["_loaded_from_file"] = True
-        st.session_state["_data_source"] = store.get("source") or "memory"
-        st.session_state["_data_loaded_at"] = datetime.now().strftime("%d %b %Y %I:%M %p")
+    if _is_user_loaded(store.get("data")):
+        _apply_restored(store["data"], store.get("source") or "memory")
         return
 
-    saved = load_saved_data()
-    if _is_valid_analysis(saved):
-        st.session_state["ai_data"] = saved
-        st.session_state["_loaded_from_file"] = True
-        st.session_state["_data_source"] = "file"
-        st.session_state["_data_loaded_at"] = datetime.now().strftime("%d %b %Y %I:%M %p")
-        store["data"] = saved
-        store["saved_at"] = time.time()
-        store["source"] = "file"
+    saved = load_saved_user_data()
+    if _is_user_loaded(saved):
+        _apply_restored(saved, "file")
         return
 
     st.session_state["_loaded_from_file"] = False
 
 
+def _sync_browser_storage():
+    """
+    Hard-refresh safe via browser localStorage.
+    Component returns None on first paint, then real value → Streamlit auto-reruns.
+    """
+    # Clear requested (Reset button)
+    if st.session_state.get("_ls_clear"):
+        result = _browser_ls(mode="clear", key="ls_clear")
+        if result is not None:
+            st.session_state.pop("_ls_clear", None)
+        return
+
+    # Pending write after Load Analysis — browser localStorage (hard-refresh survival)
+    pending = st.session_state.get("_ls_pending_write")
+    if pending:
+        _browser_ls(mode="set", value=pending, key="ls_set")
+        # HTML write is fire-and-forget; clear pending so we don't rewrite every run
+        st.session_state.pop("_ls_pending_write", None)
+        st.session_state["_ls_synced"] = True
+        return
+
+    # Already have THIS user's last load — nothing to restore
+    if _is_user_loaded(st.session_state.get("ai_data")):
+        return
+
+    # Hard refresh / new session: pull last user load from THIS browser
+    result = _browser_ls(mode="get", key="ls_get")
+    if isinstance(result, dict) and result.get("ok") and result.get("value"):
+        try:
+            data = json.loads(result["value"])
+            if _is_user_loaded(data):
+                _apply_restored(data, "browser")
+                store = _global_analysis_store()
+                store["data"] = data
+                store["saved_at"] = time.time()
+                store["source"] = "browser"
+                save_user_data_to_disk(data)
+        except Exception:
+            pass
+
+
 # ==================== AUTO-LOAD (every rerun) ====================
 restore_analysis_into_session()
+_sync_browser_storage()
 
 # ==================== MINIMAL CSS (only safe overrides) ====================
 st.markdown("""
@@ -452,7 +593,7 @@ with st.sidebar:
                     except Exception:
                         st.success(
                             f"✅ Loaded & saved ({len(data.get('stocks', []))} stocks). "
-                            "Data ab page refresh / reconnect pe bhi rahegi."
+                            "Yahi data hard refresh tak rahega — purana demo nahi aayega."
                         )
                     st.rerun()
             except Exception as e:
@@ -462,11 +603,13 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Live market snapshot
-    if _is_valid_analysis(st.session_state.get("ai_data")):
-        m = st.session_state["ai_data"].get("market", {})
+    # Live market snapshot — only YOUR last Load Analysis
+    if _is_user_loaded(st.session_state.get("ai_data")):
+        m = st.session_state["ai_data"].get("market", {}) or {}
         n_stocks = len(st.session_state["ai_data"].get("stocks") or [])
-        st.success(f"💾 **{n_stocks} stocks loaded** · sticky save ON")
+        saved_at = st.session_state["ai_data"].get("_scanner_saved_at", "")
+        st.success(f"💾 **Aapka last load:** {n_stocks} stocks" + (f" · {saved_at}" if saved_at else ""))
+        st.caption("Hard refresh pe bhi yahi rahega. Naya JSON load karoge tab overwrite hoga.")
         if m:
             st.markdown("### 🌐 Market Snapshot")
             if m.get("nifty_level"):
@@ -484,25 +627,29 @@ with st.sidebar:
                 st.caption(f"**DII:** {m['dii_flow']}")
             if m.get("market_breadth"):
                 st.caption(f"**Breadth:** {m['market_breadth']}")
-            sectors = m.get("top_bullish_sectors", [])
+            sectors = m.get("top_bullish_sectors", []) or []
             if sectors:
                 st.markdown("**Top Bullish Sectors:**")
                 for s in sectors[:5]:
-                    st.markdown(f"  ✅ {s}")
+                    if isinstance(s, dict):
+                        st.markdown(f"  ✅ {s.get('sector', s)}")
+                    else:
+                        st.markdown(f"  ✅ {s}")
             st.markdown("---")
 
     if st.button("🗑️ Reset / Clear Data", use_container_width=True, key="btn_reset_data"):
-        for k in ["ai_data", "_loaded_from_file", "_data_source", "_data_loaded_at"]:
+        for k in [
+            "ai_data", "_loaded_from_file", "_data_source", "_data_loaded_at",
+            "_ls_pending_write", "_ls_synced", "_ls_got",
+        ]:
             st.session_state.pop(k, None)
         delete_saved_data()
         st.rerun()
 
 
 # ==================== LOAD DATA ====================
-# Re-check restore (safety if sidebar widgets caused a cold session edge-case)
-restore_analysis_into_session()
-
-if _is_valid_analysis(st.session_state.get("ai_data")):
+# Only YOUR last Load Analysis (never old demo JSON)
+if _is_user_loaded(st.session_state.get("ai_data")):
     data       = st.session_state["ai_data"]
     stocks     = data.get("stocks", []) or []
     market     = data.get("market", {}) or {}
@@ -528,20 +675,19 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 if stocks:
-    src = st.session_state.get("_data_source", "session")
-    loaded_at = st.session_state.get("_data_loaded_at", "")
-    if st.session_state.get("_loaded_from_file"):
-        st.info(
-            f"💾 **Analysis restored** ({len(stocks)} stocks"
-            + (f", {loaded_at}" if loaded_at else "")
-            + f", via {src}). Filter use karo — data clear nahi hoga. **Reset** se hi clear hota hai."
-        )
-    else:
-        st.success(
-            f"✅ **Analysis active** — {len(stocks)} stocks"
-            + (f" · loaded {loaded_at}" if loaded_at else "")
-            + ". Page refresh pe bhi restore hoga."
-        )
+    src = st.session_state.get("_data_source", "user_load")
+    saved_at = data.get("_scanner_saved_at") or st.session_state.get("_data_loaded_at", "")
+    st.success(
+        f"✅ **Aapka last Load Analysis** — **{len(stocks)} stocks**"
+        + (f" · saved `{saved_at}`" if saved_at else "")
+        + f" · restore via **{src}**. "
+        "Hard refresh pe bhi yahi rahega jab tak naya JSON load / Reset na karo."
+    )
+else:
+    st.warning(
+        "📭 Koi **user-loaded** analysis nahi hai. Purana demo data band hai. "
+        "Sidebar se aaj ka JSON paste karke **Load Analysis** dabao."
+    )
 
 # ==================== REGIME BANNER ====================
 if market:
