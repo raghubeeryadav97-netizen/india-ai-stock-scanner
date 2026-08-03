@@ -1,8 +1,13 @@
 import streamlit as st
 import pandas as pd
 import json
+import hashlib
+import os
+import time
 from datetime import datetime
 from pathlib import Path
+
+PROMPT_ACCESS_HASH = hashlib.sha256("543251".encode()).hexdigest()
 
 st.set_page_config(
     page_title="India AI Stock Scanner",
@@ -12,43 +17,129 @@ st.set_page_config(
 )
 
 # ==================== PERSISTENT STORAGE ====================
-# Portable path: saves next to this script in ./artifacts/ (works on Windows + Linux)
-SAVED_DATA_FILE = Path(__file__).parent / "artifacts" / "saved_ai_stock_analysis.json"
+# Streamlit Cloud pe session reconnect / app sleep se data hat jata tha.
+# 3-layer backup: session_state → in-memory cache_resource → disk files
+_APP_DIR = Path(__file__).resolve().parent
+_SAVE_CANDIDATES = [
+    _APP_DIR / "artifacts" / "saved_ai_stock_analysis.json",
+    Path(os.environ.get("TMPDIR", os.environ.get("TMP", "/tmp"))) / "india_ai_stock_analysis.json",
+    Path.home() / ".india_ai_stock_scanner" / "saved_ai_stock_analysis.json",
+]
+SAVED_DATA_FILE = _SAVE_CANDIDATES[0]
+
+
+@st.cache_resource
+def _global_analysis_store():
+    """Survives browser reconnects while the Streamlit process stays warm."""
+    return {"data": None, "saved_at": None, "source": None}
+
+
+def _is_valid_analysis(data):
+    return isinstance(data, dict) and (
+        bool(data.get("stocks")) or bool(data.get("market")) or bool(data.get("strategy"))
+    )
+
+
+def _read_json_file(path: Path):
+    try:
+        if path.exists() and path.stat().st_size > 2:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if _is_valid_analysis(data):
+                return data, path.stat().st_mtime
+    except Exception:
+        pass
+    return None, 0
+
 
 def load_saved_data():
-    if SAVED_DATA_FILE.exists():
-        try:
-            with open(SAVED_DATA_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return None
-    return None
+    best, best_mtime = None, 0
+    for path in _SAVE_CANDIDATES:
+        data, mtime = _read_json_file(path)
+        if data is not None and mtime >= best_mtime:
+            best, best_mtime = data, mtime
+    return best
+
 
 def save_data_to_file(data_dict):
-    try:
-        SAVED_DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(SAVED_DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(data_dict, f, indent=2, ensure_ascii=False)
-        return True
-    except Exception as e:
-        st.error(f"Could not save: {e}")
-        return False
+    """Write to every writable path so Cloud reboot / path quirks don't wipe analysis."""
+    ok = False
+    last_err = None
+    payload = dict(data_dict)
+    payload["_scanner_saved_at"] = datetime.now().isoformat(timespec="seconds")
+    for path in _SAVE_CANDIDATES:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+            ok = True
+        except Exception as e:
+            last_err = e
+    store = _global_analysis_store()
+    store["data"] = payload
+    store["saved_at"] = time.time()
+    store["source"] = "user_load"
+    if not ok and last_err is not None:
+        st.warning(f"Disk save failed (session memory still holds data): {last_err}")
+    return ok
+
 
 def delete_saved_data():
-    if SAVED_DATA_FILE.exists():
+    store = _global_analysis_store()
+    store["data"] = None
+    store["saved_at"] = None
+    store["source"] = None
+    for path in _SAVE_CANDIDATES:
         try:
-            SAVED_DATA_FILE.unlink()
+            if path.exists():
+                path.unlink()
         except Exception:
             pass
 
-# ==================== AUTO-LOAD ====================
-if "ai_data" not in st.session_state:
+
+def persist_analysis(data_dict, source="user_load"):
+    """Single entry-point: session + memory + disk."""
+    st.session_state["ai_data"] = data_dict
+    st.session_state["_loaded_from_file"] = source != "user_load"
+    st.session_state["_data_source"] = source
+    st.session_state["_data_loaded_at"] = datetime.now().strftime("%d %b %Y %I:%M %p")
+    save_data_to_file(data_dict)
+
+
+def restore_analysis_into_session():
+    """Fill empty session from memory store, then disk. Never clobber live session data."""
+    if _is_valid_analysis(st.session_state.get("ai_data")):
+        # Keep memory/disk in sync so reconnects can recover
+        store = _global_analysis_store()
+        if store.get("data") is not st.session_state["ai_data"]:
+            store["data"] = st.session_state["ai_data"]
+            store["saved_at"] = store.get("saved_at") or time.time()
+        return
+
+    store = _global_analysis_store()
+    if _is_valid_analysis(store.get("data")):
+        st.session_state["ai_data"] = store["data"]
+        st.session_state["_loaded_from_file"] = True
+        st.session_state["_data_source"] = store.get("source") or "memory"
+        st.session_state["_data_loaded_at"] = datetime.now().strftime("%d %b %Y %I:%M %p")
+        return
+
     saved = load_saved_data()
-    if saved:
+    if _is_valid_analysis(saved):
         st.session_state["ai_data"] = saved
         st.session_state["_loaded_from_file"] = True
-    else:
-        st.session_state["_loaded_from_file"] = False
+        st.session_state["_data_source"] = "file"
+        st.session_state["_data_loaded_at"] = datetime.now().strftime("%d %b %Y %I:%M %p")
+        store["data"] = saved
+        store["saved_at"] = time.time()
+        store["source"] = "file"
+        return
+
+    st.session_state["_loaded_from_file"] = False
+
+
+# ==================== AUTO-LOAD (every rerun) ====================
+restore_analysis_into_session()
 
 # ==================== MINIMAL CSS (only safe overrides) ====================
 st.markdown("""
@@ -95,6 +186,12 @@ st.markdown("""
 .metric-box .val { font-size:28px; font-weight:800; color:#0f2744; }
 .metric-box .lbl { font-size:11px; color:#94a3b8; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; margin-top:2px; }
 .metric-box .sub { font-size:10px; color:#cbd5e1; margin-top:2px; }
+
+/* Prompt lock — discourage copy */
+[data-testid="stSidebar"] .stCodeBlock pre {
+  user-select: none;
+  -webkit-user-select: none;
+}
 
 /* Regime banner */
 .regime { background:linear-gradient(90deg,#052e16,#064e3b); border-radius:10px;
@@ -165,14 +262,8 @@ def target_boxes(row):
     </div>"""
 
 
-# ==================== SIDEBAR ====================
-with st.sidebar:
-    st.markdown("## 📈 India AI Scanner")
-    st.markdown("---")
-    st.markdown("### 🤖 Step 1 — Get AI Prompt")
-
-    if st.button("📋 Copy Fresh AI Prompt", use_container_width=True):
-        prompt = """You are an elite Indian equity market strategist, institutional flow analyst, portfolio manager, and quantitative stock screener specializing in Indian equities.
+def get_ai_prompt_text():
+    return """You are an elite Indian equity market strategist, institutional flow analyst, portfolio manager, and quantitative stock screener specializing in Indian equities.
 
 MISSION
 Analyze the CURRENT Indian stock market using the latest available verified data and identify ONLY the highest-probability bullish opportunities for swing trading and positional investing.
@@ -279,26 +370,91 @@ Return ONLY valid JSON. No markdown. No explanation. No notes.
     }
   ]
 }"""
-        st.code(prompt, language="text")
-        st.info("⬆️ Copy → Paste in Claude/Grok → Get JSON → Come back here")
+
+
+# ==================== SIDEBAR ====================
+with st.sidebar:
+    st.markdown("## 📈 India AI Scanner")
+    st.markdown("---")
+    st.markdown("### 🤖 Step 1 — Get AI Prompt")
+
+    if not st.session_state.get("prompt_unlocked"):
+        st.markdown("🔒 **Prompt locked**")
+        st.caption("Sirf authorized users prompt dekh/copy kar sakte hain.")
+        prompt_pwd = st.text_input("Password", type="password", key="prompt_password", placeholder="Enter password")
+        if st.button("🔓 Unlock Prompt", use_container_width=True):
+            entered_hash = hashlib.sha256(prompt_pwd.encode()).hexdigest()
+            if entered_hash == PROMPT_ACCESS_HASH:
+                st.session_state["prompt_unlocked"] = True
+                st.success("✅ Unlocked!")
+                st.rerun()
+            else:
+                st.error("❌ Galat password")
+    else:
+        if st.button("📋 Show AI Prompt", use_container_width=True):
+            st.session_state["show_prompt"] = True
+        if st.session_state.get("show_prompt"):
+            st.code(get_ai_prompt_text(), language="text")
+            st.info("⬆️ Copy → Paste in Claude/Grok → Get JSON → Come back here")
+        if st.button("🔒 Lock Prompt", use_container_width=True):
+            st.session_state["prompt_unlocked"] = False
+            st.session_state.pop("show_prompt", None)
+            st.rerun()
 
     st.markdown("---")
     st.markdown("### 📥 Step 2 — Paste JSON")
     pasted_json = st.text_area(
-        "",
+        "JSON payload",
         height=200,
-        placeholder='{"market": {...}, "stocks": [...]}\n\nPaste full JSON from AI here'
+        placeholder='{"market": {...}, "stocks": [...]}\n\nPaste full JSON from AI here',
+        key="pasted_json_input",
+        label_visibility="collapsed",
     )
 
-    if st.button("🚀 Load Analysis", type="primary", use_container_width=True):
+    smart_api = st.text_input(
+        "Smart Market API (trade feed)",
+        value=os.environ.get("SMART_MARKET_API", "http://localhost:5001"),
+        help="Load Analysis pe picks yahan push honge → Trade Desk confirm trade",
+        key="smart_market_api",
+    )
+
+    if st.button("🚀 Load Analysis", type="primary", use_container_width=True, key="btn_load_analysis"):
         if pasted_json.strip():
             try:
-                data = json.loads(pasted_json)
-                st.session_state["ai_data"] = data
-                st.session_state["_loaded_from_file"] = False
-                save_data_to_file(data)
-                st.success("✅ Loaded & saved!")
-                st.rerun()
+                raw = pasted_json.strip()
+                # Strip accidental markdown fences from AI output
+                if raw.startswith("```"):
+                    raw = raw.strip("`")
+                    if raw.lower().startswith("json"):
+                        raw = raw[4:].lstrip()
+                data = json.loads(raw)
+                if not _is_valid_analysis(data):
+                    st.error("❌ JSON parsed, lekin stocks/market data nahi mila. Full AI JSON paste karo.")
+                else:
+                    persist_analysis(data, source="user_load")
+                    # Optional Trade Desk push (local only; cloud → localhost fail OK)
+                    try:
+                        import urllib.request
+                        url = f"{smart_api.rstrip('/')}/api/picks/import"
+                        body = json.dumps({**data, "source": "streamlit_india_ai_scanner"}).encode("utf-8")
+                        req = urllib.request.Request(
+                            url,
+                            data=body,
+                            headers={"Content-Type": "application/json", "X-Picks-Source": "streamlit"},
+                            method="POST",
+                        )
+                        with urllib.request.urlopen(req, timeout=5) as resp:
+                            push = json.loads(resp.read().decode("utf-8"))
+                        st.success(
+                            f"✅ Loaded & saved ({len(data.get('stocks', []))} stocks). "
+                            f"Trade Desk: {push.get('imported')} imported."
+                        )
+                    except Exception:
+                        st.success(
+                            f"✅ Loaded & saved ({len(data.get('stocks', []))} stocks). "
+                            "Data ab page refresh / reconnect pe bhi rahegi."
+                        )
+                    st.rerun()
             except Exception as e:
                 st.error(f"❌ Invalid JSON: {str(e)}")
         else:
@@ -307,8 +463,10 @@ Return ONLY valid JSON. No markdown. No explanation. No notes.
     st.markdown("---")
 
     # Live market snapshot
-    if "ai_data" in st.session_state:
+    if _is_valid_analysis(st.session_state.get("ai_data")):
         m = st.session_state["ai_data"].get("market", {})
+        n_stocks = len(st.session_state["ai_data"].get("stocks") or [])
+        st.success(f"💾 **{n_stocks} stocks loaded** · sticky save ON")
         if m:
             st.markdown("### 🌐 Market Snapshot")
             if m.get("nifty_level"):
@@ -319,7 +477,7 @@ Return ONLY valid JSON. No markdown. No explanation. No notes.
                     st.metric("VIX", m["vix_level"])
             with cols[1]:
                 if m.get("regime"):
-                    st.metric("Regime", m["regime"][:12])
+                    st.metric("Regime", str(m["regime"])[:12])
             if m.get("fii_flow"):
                 st.caption(f"**FII:** {m['fii_flow']}")
             if m.get("dii_flow"):
@@ -333,19 +491,22 @@ Return ONLY valid JSON. No markdown. No explanation. No notes.
                     st.markdown(f"  ✅ {s}")
             st.markdown("---")
 
-    if st.button("🗑️ Reset / Clear Data", use_container_width=True):
-        for k in ["ai_data", "_loaded_from_file"]:
+    if st.button("🗑️ Reset / Clear Data", use_container_width=True, key="btn_reset_data"):
+        for k in ["ai_data", "_loaded_from_file", "_data_source", "_data_loaded_at"]:
             st.session_state.pop(k, None)
         delete_saved_data()
         st.rerun()
 
 
 # ==================== LOAD DATA ====================
-if "ai_data" in st.session_state:
+# Re-check restore (safety if sidebar widgets caused a cold session edge-case)
+restore_analysis_into_session()
+
+if _is_valid_analysis(st.session_state.get("ai_data")):
     data       = st.session_state["ai_data"]
-    stocks     = data.get("stocks", [])
-    market     = data.get("market", {})
-    strategy   = data.get("strategy", {})
+    stocks     = data.get("stocks", []) or []
+    market     = data.get("market", {}) or {}
+    strategy   = data.get("strategy", {}) or {}
 else:
     data, stocks, market, strategy = {}, [], {}, {}
 
@@ -366,8 +527,21 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-if st.session_state.get("_loaded_from_file") and stocks:
-    st.info("💾 Auto-loaded from previously saved analysis. Click **Reset** to clear.")
+if stocks:
+    src = st.session_state.get("_data_source", "session")
+    loaded_at = st.session_state.get("_data_loaded_at", "")
+    if st.session_state.get("_loaded_from_file"):
+        st.info(
+            f"💾 **Analysis restored** ({len(stocks)} stocks"
+            + (f", {loaded_at}" if loaded_at else "")
+            + f", via {src}). Filter use karo — data clear nahi hoga. **Reset** se hi clear hota hai."
+        )
+    else:
+        st.success(
+            f"✅ **Analysis active** — {len(stocks)} stocks"
+            + (f" · loaded {loaded_at}" if loaded_at else "")
+            + ". Page refresh pe bhi restore hoga."
+        )
 
 # ==================== REGIME BANNER ====================
 if market:
@@ -506,30 +680,41 @@ else:
 st.markdown("---")
 
 # ==================== FULL SCANNER TABLE ====================
-st.markdown("### 📊 Full Scanner Table")
+# Fragment: filter/slider changes only re-run this block (no full-page jump / "data gayab" feel)
+@st.fragment
+def render_scanner_table(source_df: pd.DataFrame):
+    st.markdown("### 📊 Full Scanner Table")
+    if source_df.empty:
+        st.info("Load data from sidebar to see full scanner table.")
+        return
 
-if not df.empty:
     f1, f2, f3, f4 = st.columns([2, 2, 2, 2])
     with f1:
-        search = st.text_input("🔍 Search", placeholder="Symbol / Company...")
+        search = st.text_input("🔍 Search", placeholder="Symbol / Company...", key="tbl_search")
     with f2:
-        secs = ["All"] + sorted(df['sector'].unique().tolist()) if 'sector' in df.columns else ["All"]
-        sel_sec = st.selectbox("Sector", secs)
+        secs = ["All"] + sorted(source_df['sector'].dropna().unique().tolist()) if 'sector' in source_df.columns else ["All"]
+        sel_sec = st.selectbox("Sector", secs, key="tbl_sector")
     with f3:
-        min_conf = st.slider("Min AI Score", 60, 99, 75)
+        min_conf = st.slider("Min AI Score", 60, 99, 75, key="tbl_min_conf")
     with f4:
-        verd_filter = st.multiselect("Verdict", ["STRONG BUY", "BUY", "HOLD"], default=["STRONG BUY", "BUY"])
+        verd_filter = st.multiselect(
+            "Verdict",
+            ["STRONG BUY", "BUY", "HOLD"],
+            default=["STRONG BUY", "BUY"],
+            key="tbl_verdict",
+        )
 
-    fdf = df.copy()
+    fdf = source_df.copy()
     if search and 'symbol' in fdf.columns:
+        name_col = fdf['full_name'] if 'full_name' in fdf.columns else pd.Series([""] * len(fdf))
         fdf = fdf[
-            fdf['symbol'].str.contains(search, case=False, na=False) |
-            fdf['full_name'].str.contains(search, case=False, na=False)
+            fdf['symbol'].astype(str).str.contains(search, case=False, na=False) |
+            name_col.astype(str).str.contains(search, case=False, na=False)
         ]
     if sel_sec != "All" and 'sector' in fdf.columns:
         fdf = fdf[fdf['sector'] == sel_sec]
     if 'ai_confidence' in fdf.columns:
-        fdf = fdf[fdf['ai_confidence'] >= min_conf]
+        fdf = fdf[pd.to_numeric(fdf['ai_confidence'], errors='coerce').fillna(0) >= min_conf]
     if verd_filter and 'verdict' in fdf.columns:
         fdf = fdf[fdf['verdict'].isin(verd_filter)]
 
@@ -552,13 +737,14 @@ if not df.empty:
     }
 
     col_cfg = {}
-    if 'Price ₹' in [rename_map.get(c,c) for c in disp_cols]:
+    renamed_preview = [rename_map.get(c, c) for c in disp_cols]
+    if 'Price ₹' in renamed_preview:
         col_cfg["Price ₹"] = st.column_config.NumberColumn(format="₹%.2f")
-    if 'Chg %' in [rename_map.get(c,c) for c in disp_cols]:
+    if 'Chg %' in renamed_preview:
         col_cfg["Chg %"] = st.column_config.NumberColumn(format="%.2f%%")
-    if 'AI Score' in [rename_map.get(c,c) for c in disp_cols]:
+    if 'AI Score' in renamed_preview:
         col_cfg["AI Score"] = st.column_config.ProgressColumn(min_value=60, max_value=100, format="%d%%")
-    if 'RR' in [rename_map.get(c,c) for c in disp_cols]:
+    if 'RR' in renamed_preview:
         col_cfg["RR"] = st.column_config.NumberColumn(format="%.1fx")
 
     st.dataframe(
@@ -574,12 +760,13 @@ if not df.empty:
         "⬇️ Export CSV",
         data=csv,
         file_name=f"india_ai_stocks_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-        mime="text/csv"
+        mime="text/csv",
+        key="btn_export_csv",
     )
-    st.caption(f"Showing **{len(fdf)}** of **{len(df)}** stocks · Min AI Score ≥ {min_conf}%")
+    st.caption(f"Showing **{len(fdf)}** of **{len(source_df)}** stocks · Min AI Score ≥ {min_conf}%")
 
-else:
-    st.info("Load data from sidebar to see full scanner table.")
+
+render_scanner_table(df)
 
 # ==================== DISCLAIMER ====================
 st.markdown("---")
